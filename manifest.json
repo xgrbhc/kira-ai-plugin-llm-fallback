@@ -1,0 +1,24 @@
+{
+  "display_name": "LLM Fallback",
+  "plugin_id": "kira-ai-plugin-llm-fallback",
+  "version": "0.1.0",
+  "core_version": ">=2.29.0",
+  "author": "xgrbhc",
+  "description": "Adds ordered fallback models to KiraAI's native LLM agent execution flow.",
+  "repo": "https://github.com/xgrbhc/kira-ai-plugin-llm-fallback",
+  "tags": [
+    "llm",
+    "fallback",
+    "reliability"
+  ],
+  "locales": {
+    "zh": {
+      "display_name": "LLM 模型回退",
+      "description": "为 KiraAI 原生 LLM Agent 执行流程追加有序备用模型。"
+    },
+    "en": {
+      "display_name": "LLM Fallback",
+      "description": "Adds ordered fallback models to KiraAI's native LLM agent execution flow."
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "fallback_model_1": {
+    "type": "model_select",
+    "model_type": "llm",
+    "name": "First fallback model",
+    "default": "",
+    "hint": "Tried after the current primary model or existing event model group fails. Leave empty to disable this slot.",
+    "locales": {
+      "zh": {
+        "name": "第一备用模型",
+        "hint": "当前主模型或事件已有模型组失败后尝试。留空则禁用此位置。"
+      },
+      "en": {
+        "name": "First fallback model",
+        "hint": "Tried after the current primary model or existing event model group fails. Leave empty to disable this slot."
+      }
+    }
+  },
+  "fallback_model_2": {
+    "type": "model_select",
+    "model_type": "llm",
+    "name": "Second fallback model",
+    "default": "",
+    "hint": "Tried after the first fallback model fails. Leave empty to disable this slot.",
+    "locales": {
+      "zh": {
+        "name": "第二备用模型",
+        "hint": "第一备用模型失败后继续尝试。留空则禁用此位置。"
+      },
+      "en": {
+        "name": "Second fallback model",
+        "hint": "Tried after the first fallback model fails. Leave empty to disable this slot."
+      }
+    }
+  }
+}
