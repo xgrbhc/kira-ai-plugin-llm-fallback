@@ -1,7 +1,7 @@
 {
   "display_name": "LLM Fallback",
   "plugin_id": "kira-ai-plugin-llm-fallback",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "core_version": ">=2.29.0",
   "author": "xgrbhc",
   "description": "Adds ordered fallback models to KiraAI's native LLM agent execution flow.",

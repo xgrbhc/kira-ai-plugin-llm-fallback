@@ -19,6 +19,7 @@ from core.provider import (
     ModelType,
     ProviderAPIError,
 )
+from core.logging_manager import logger_color_mapping
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 MODULE_NAME = "kira_ai_plugin_llm_fallback_tests"
 MODULE_SPEC = importlib.util.spec_from_file_location(MODULE_NAME, PLUGIN_DIR / "main.py")
@@ -27,6 +28,7 @@ PLUGIN_MODULE = importlib.util.module_from_spec(MODULE_SPEC)
 sys.modules[MODULE_NAME] = PLUGIN_MODULE
 MODULE_SPEC.loader.exec_module(PLUGIN_MODULE)
 LLMFallbackPlugin = PLUGIN_MODULE.LLMFallbackPlugin
+ValidatedLLMClient = PLUGIN_MODULE._ValidatedLLMClient
 
 
 class ScriptedLLM(LLMModelClient):
@@ -140,7 +142,12 @@ async def test_builds_default_and_two_fallbacks_in_configured_order():
 
     await plugin.append_fallback_models(event)
 
-    assert event.model_group == [primary, fallback_1, fallback_2]
+    assert [client._client for client in event.model_group] == [
+        primary,
+        fallback_1,
+        fallback_2,
+    ]
+    assert all(isinstance(client, ValidatedLLMClient) for client in event.model_group)
     assert ctx.resolved == ["backup-a:model-a", "backup-b:model-b"]
 
 
@@ -168,8 +175,12 @@ async def test_preserves_existing_group_and_deduplicates_fallbacks():
 
     await plugin.append_fallback_models(event)
 
-    assert event.model_group == [custom, existing_backup, fallback_2]
-    assert default not in event.model_group
+    assert [client._client for client in event.model_group] == [
+        custom,
+        existing_backup,
+        fallback_2,
+    ]
+    assert default not in [client._client for client in event.model_group]
 
 
 @pytest.mark.asyncio
@@ -249,6 +260,64 @@ async def test_primary_failure_falls_back_and_preserves_cached_tokens():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_response", [None, LLMResponse("")])
+async def test_none_or_empty_response_uses_fallback(invalid_response):
+    primary = ScriptedLLM("p", "primary", [invalid_response])
+    fallback = ScriptedLLM("f", "fallback", [LLMResponse("<msg>fallback</msg>")])
+    ctx = FakePluginContext(primary, {"f:fallback": fallback})
+    plugin = make_plugin(ctx, fallback_model_1="f:fallback")
+    await plugin.initialize()
+    event = make_event()
+    await plugin.append_fallback_models(event)
+
+    steps = await collect_steps(event.model_group)
+
+    assert steps[0].state == "success"
+    assert steps[0].model_id == "fallback"
+    assert steps[0].llm_response.text_response == "<msg>fallback</msg>"
+    assert len(primary.calls) == len(fallback.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_nonempty_response_without_token_usage_does_not_fall_back():
+    primary = ScriptedLLM("p", "primary", [LLMResponse("<msg/>")])
+    fallback = ScriptedLLM("f", "fallback", [LLMResponse("must not run")])
+    ctx = FakePluginContext(primary, {"f:fallback": fallback})
+    plugin = make_plugin(ctx, fallback_model_1="f:fallback")
+    await plugin.initialize()
+    event = make_event()
+    await plugin.append_fallback_models(event)
+
+    steps = await collect_steps(event.model_group)
+
+    assert steps[0].model_id == "primary"
+    assert steps[0].llm_response.text_response == "<msg/>"
+    assert fallback.calls == []
+
+
+@pytest.mark.asyncio
+async def test_empty_text_with_tool_calls_is_not_treated_as_failure():
+    tool_call = {
+        "id": "call-valid",
+        "type": "function",
+        "function": {"name": "test_tool", "arguments": "{}"},
+    }
+    primary = ScriptedLLM("p", "primary", [LLMResponse("", tool_calls=[tool_call])])
+    fallback = ScriptedLLM("f", "fallback", [LLMResponse("must not run")])
+    ctx = FakePluginContext(primary, {"f:fallback": fallback})
+    plugin = make_plugin(ctx, fallback_model_1="f:fallback")
+    await plugin.initialize()
+    event = make_event()
+    await plugin.append_fallback_models(event)
+
+    steps = await collect_steps(event.model_group)
+
+    assert steps[0].model_id == "primary"
+    assert steps[0].has_tool_calls is True
+    assert fallback.calls == []
+
+
+@pytest.mark.asyncio
 async def test_second_failure_uses_third_model():
     primary = ScriptedLLM("p", "primary", [ProviderAPIError("p failed")])
     fallback_1 = ScriptedLLM("f1", "fallback-1", [ProviderAPIError("f1 failed")])
@@ -319,15 +388,18 @@ async def test_concurrent_and_new_events_use_independent_group_lists():
         plugin.append_fallback_models(second),
     )
 
-    assert first.model_group == [primary, fallback]
-    assert second.model_group == [primary, fallback]
+    assert [client._client for client in first.model_group] == [primary, fallback]
+    assert [client._client for client in second.model_group] == [primary, fallback]
     assert first.model_group is not second.model_group
 
     replacement_primary = ScriptedLLM("p2", "new-primary")
     ctx.default_client = replacement_primary
     third = make_event(event_id="third")
     await plugin.append_fallback_models(third)
-    assert third.model_group == [replacement_primary, fallback]
+    assert [client._client for client in third.model_group] == [
+        replacement_primary,
+        fallback,
+    ]
 
 
 def test_manifest_and_schema_are_valid_and_expose_llm_model_selects():
@@ -335,12 +407,17 @@ def test_manifest_and_schema_are_valid_and_expose_llm_model_selects():
     schema = json.loads((PLUGIN_DIR / "schema.json").read_text(encoding="utf-8"))
 
     assert manifest["plugin_id"] == "kira-ai-plugin-llm-fallback"
+    assert manifest["version"] == "0.1.1"
     assert PLUGIN_DIR.name == manifest["plugin_id"]
-    assert manifest["core_version"] == ">=2.23.0"
-    assert "repo" not in manifest
+    assert manifest["core_version"] == ">=2.29.0"
+    assert manifest["repo"] == "https://github.com/xgrbhc/kira-ai-plugin-llm-fallback"
     assert set(schema) == {"fallback_model_1", "fallback_model_2"}
     for field in schema.values():
         assert field["type"] == "model_select"
         assert field["model_type"] == "llm"
         assert field["default"] == ""
         assert {"zh", "en"}.issubset(field["locales"])
+
+
+def test_plugin_uses_same_cyan_log_color_as_plugin_installer():
+    assert logger_color_mapping["kira-ai-plugin-llm-fallback"] == "cyan"

@@ -1,6 +1,6 @@
 # KiraAI LLM Fallback Plugin
 
-一个尽量贴合 KiraAI 原生架构的 LLM 故障转移插件。当主模型发生 Provider/API 级调用失败时，KiraAI 会按配置顺序尝试备用模型；插件不替换 Agent Loop，不修改全局默认模型，也不单独维护对话、工具或缓存流程。
+一个尽量贴合 KiraAI 原生架构的 LLM 故障转移插件。当主模型发生 Provider/API 级调用失败，或者 Provider 返回 `None`/不可用的空响应时，KiraAI 会按配置顺序尝试备用模型；插件不替换 Agent Loop，不修改全局默认模型，也不单独维护对话、工具或缓存流程。
 
 ## 一、结论与设计原则
 
@@ -14,11 +14,11 @@ KiraAI 的 `KiraMessageBatchEvent` 已提供 `model_group`，`AgentExecutor` 也
 
 核心原则：
 
-- **复用主项目流程**：实际调用、异常捕获、Tool Calling、XML 输出、记忆更新和遥测仍由 KiraAI 完成。
+- **复用主项目流程**：实际调度、异常捕获、Tool Calling、XML 输出、记忆更新和遥测仍由 KiraAI 完成；插件只把不可用响应转换为核心已支持的 `ProviderAPIError`。
 - **事件级生效**：模型组只属于当前 `KiraMessageBatchEvent`，不会修改 `models.default_llm`。
 - **无全局切换状态**：每个新事件重新读取当前默认主模型；并发会话互不共享“当前模型”。
 - **尊重其他插件**：如果其他插件已经提供模型组，本插件保留其顺序，只在末尾追加备用模型。
-- **最小侵入**：不注册 Provider、Tool、Tag、独立 API 或插件页面，不 monkey patch 模型客户端。
+- **最小侵入**：不注册 Provider、Tool、Tag、独立 API 或插件页面，不 monkey patch 模型客户端；只为当前事件创建无状态透明代理。
 - **安全失效**：备用模型为空、重复、被删除或暂时不可用时跳过；不阻断原有消息链路。
 
 ## 二、主项目接入位置
@@ -37,17 +37,17 @@ sequenceDiagram
 
     IM->>Hook: KiraMessageBatchEvent
     Hook->>Hook: 保留已有模型组或读取默认 LLM
-    Hook->>Hook: 解析、去重并追加备用模型
+    Hook->>Hook: 解析、去重、追加备用模型并包装响应校验
     Hook-->>MM: event.model_group
     MM->>AE: 同一个 LLMRequest + model_group
     AE->>P: chat(request)
     alt 主模型成功
         P-->>AE: LLMResponse
-    else 可降级异常
+    else 可降级异常或不可用响应
         AE->>F1: chat(同一个 request)
         alt 备用模型 1 成功
             F1-->>AE: LLMResponse
-        else 可降级异常
+        else 可降级异常或不可用响应
             AE->>F2: chat(同一个 request)
             F2-->>AE: LLMResponse 或最终失败
         end
@@ -110,7 +110,7 @@ WebUI 会从主项目现有 Provider/模型配置生成 LLM 下拉框。插件�
 
 ## 四、故障转移语义
 
-插件不自行捕获模型调用异常。当前 KiraAI `AgentExecutor` 会对以下 Provider/API 级异常尝试下一个模型：
+插件不自行调度重试，也不捕获 Provider 抛出的调用异常。当前 KiraAI `AgentExecutor` 会对以下 Provider/API 级异常尝试下一个模型：
 
 - `openai.APIStatusError`
 - `openai.APITimeoutError`
@@ -119,15 +119,26 @@ WebUI 会从主项目现有 Provider/模型配置生成 LLM 下拉框。插件�
 
 每个模型在一个 Agent Step 内由核心尝试一次；Provider SDK 自身可能还有内部重试策略，本插件不会增加同模型重试。
 
+为了覆盖部分第三方 Provider “没有抛异常，却返回 `None` 或空对象”的情况，插件会给当前事件的模型组套一层无状态代理。代理仍调用原始客户端的 `chat()`，并原样返回有效的 `LLMResponse`；只有以下不可用结果会被转换成 `ProviderAPIError`，随后由核心进入同一条原生 fallback 路径：
+
+- 返回值是 `None`。
+- 返回值不是 `LLMResponse`。
+- `LLMResponse` 同时没有非空文本和 Tool Call。
+
+Token 统计为 `None` 本身不表示失败：只要存在有效文本或 Tool Call，响应仍会正常使用。`<msg/>` 是 KiraAI 明确的静默响应，也属于有效的非空文本。空文本但包含 Tool Call 的响应同样有效。
+
 以下情况不由 MVP 扩大为 fallback：
 
-- Provider 返回了合法但为空的响应。
 - 模型正常返回拒绝、内容过滤或无法回答。
 - Tool 执行失败、XML 解析失败或消息发送失败。
 - `TypeError`、`ValueError`、`RuntimeError` 等程序错误。
-- 第三方 Provider 没有把调用错误转换为上述可降级异常。
+- 第三方 Provider 以非空但语义错误的文本返回失败信息，而不是抛异常。
 
 这样可以避免把插件 bug、参数 bug 或工具副作用错误误判成“模型不可用”。
+
+### 日志
+
+插件使用独立日志名称 `kira-ai-plugin-llm-fallback`，颜色为 cyan，与主项目的 `plugin_installer` 日志颜色一致。实际模型失败、切换和切换成功日志仍由 KiraAI 核心的 `agent_executor`/`llm` logger 输出。
 
 ### Agent Loop 中的模型选择
 

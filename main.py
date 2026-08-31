@@ -9,8 +9,50 @@ from __future__ import annotations
 from typing import Optional
 
 from core.chat.message_utils import KiraMessageBatchEvent
-from core.plugin import BasePlugin, Priority, logger, on
-from core.provider import LLMModelClient
+from core.logging_manager import get_logger
+from core.plugin import BasePlugin, Priority, on
+from core.provider import (
+    LLMModelClient,
+    LLMRequest,
+    LLMResponse,
+    ProviderAPIError,
+)
+
+
+logger = get_logger("kira-ai-plugin-llm-fallback", "cyan")
+
+
+class _ValidatedLLMClient(LLMModelClient):
+    """Convert unusable provider responses into native failover exceptions."""
+
+    def __init__(self, client: LLMModelClient):
+        super().__init__(client.model)
+        self._client = client
+
+    async def chat(self, request: LLMRequest, **kwargs) -> LLMResponse:
+        response = await self._client.chat(request, **kwargs)
+
+        if response is None:
+            raise ProviderAPIError(
+                f"Model {self.model.model_id} returned None instead of an LLMResponse"
+            )
+
+        if not isinstance(response, LLMResponse):
+            raise ProviderAPIError(
+                f"Model {self.model.model_id} returned an invalid response type: "
+                f"{type(response).__name__}"
+            )
+
+        # A useful response must either communicate content or request a tool.
+        # Explicit KiraAI silence such as <msg/> remains valid non-empty text.
+        text = response.text_response
+        has_text = isinstance(text, str) and bool(text.strip())
+        if not has_text and not response.tool_calls:
+            raise ProviderAPIError(
+                f"Model {self.model.model_id} returned an empty LLMResponse"
+            )
+
+        return response
 
 
 class LLMFallbackPlugin(BasePlugin):
@@ -99,7 +141,15 @@ class LLMFallbackPlugin(BasePlugin):
         if not appended:
             return
 
-        event.model_group = model_group
+        # AgentExecutor already fails over on ProviderAPIError. Wrapping the
+        # event-scoped clients lets it apply the same native path when a
+        # provider incorrectly returns None or an unusable empty response.
+        event.model_group = [
+            client
+            if isinstance(client, _ValidatedLLMClient)
+            else _ValidatedLLMClient(client)
+            for client in model_group
+        ]
         logger.debug(
             "[LLMFallback] Event %s model group: %s",
             event.event_id,
